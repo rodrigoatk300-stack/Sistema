@@ -590,8 +590,8 @@ dialog .wb{max-height:86vh; overflow:auto}
    Enquanto estiverem vazios, a Guilda funciona só neste aparelho.
    ============================================================ */
 const NUVEM = {
-  url: "",   // ex.: "https://abcdefgh.supabase.co"
-  key: ""    // a chave "anon public" (é longa, começa com eyJ...)
+  url: "https://cxvgzddrafuyjsonkaqk.supabase.co",
+  key: "sb_publishable_deo79FB2ODEqWY2QAKCeFQ_2a-h0chK"
 };
 
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
@@ -730,7 +730,14 @@ function hunterId(){
   return S.hunter;
 }
 let CLOUD=null, cloudInfo="", cloudBusy=false, lastSend=0, lastFetch=0;
-function nuvemHeaders(){return {apikey:NUVEM.key,Authorization:"Bearer "+NUVEM.key};}
+function nuvemHeaders(){
+  const h={apikey:NUVEM.key};
+  /* chave antiga (eyJ...) vai tambem no Authorization; a nova (sb_publishable_) nao */
+  if(/^eyJ/.test(NUVEM.key))h.Authorization="Bearer "+NUVEM.key;
+  return h;
+}
+/* aceita a URL com ou sem /rest/v1 no fim */
+const nuvemBase=()=>NUVEM.url.trim().replace(/\/+$/,"").replace(/\/rest\/v1$/i,"");
 
 async function publicarStatus(forcado){
   if(!nuvemLigada()||!CUR)return false;
@@ -742,7 +749,7 @@ async function publicarStatus(forcado){
     level:S.level,total_xp:S.stats.totalXp|0,streak:S.streak|0,gold:S.gold|0,
     titles:(S.titles||[]).length,stats:st,look:{char:S.char,equip:S.equip}};
   try{
-    const r=await fetch(NUVEM.url.replace(/\/+$/,"")+"/rest/v1/placar",{
+    const r=await fetch(nuvemBase()+"/rest/v1/placar",{
       method:"POST",headers:Object.assign({"Content-Type":"application/json",Prefer:"return=minimal"},nuvemHeaders()),
       body:JSON.stringify(corpo)});
     if(!r.ok)throw new Error("HTTP "+r.status);
@@ -755,7 +762,7 @@ async function buscarPlacar(forcado){
   if(!forcado&&agora-lastFetch<30000)return;
   lastFetch=agora; cloudBusy=true; renderGuild();
   try{
-    const url=NUVEM.url.replace(/\/+$/,"")+"/rest/v1/ranking?guild=eq."+encodeURIComponent(guildName())+
+    const url=nuvemBase()+"/rest/v1/ranking?guild=eq."+encodeURIComponent(guildName())+
       "&order=level.desc,total_xp.desc&limit=100";
     const r=await fetch(url,{headers:nuvemHeaders()});
     if(!r.ok)throw new Error("HTTP "+r.status);
