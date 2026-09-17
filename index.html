@@ -9,6 +9,12 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Rajdhani:wght@400;500;600;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2304070f'/%3E%3Cpath d='M16 4 L27 16 L16 28 L5 16 Z' fill='none' stroke='%235ec7ff' stroke-width='2.5'/%3E%3Cpath d='M16 10 L22 16 L16 22 L10 16 Z' fill='%235ec7ff'/%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icone-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Despertar">
 <style>
 :root{
   --void:#04070f; --void2:#080e1c; --ink:#0b1526;
@@ -463,6 +469,14 @@ dialog .wb{max-height:86vh; overflow:auto}
           <ul class="log" id="loglist"></ul>
         </div></div>
         <div class="win"><div class="wb">
+          <h2 class="wt">Notificações do Sistema</h2>
+          <p style="margin:-4px 0 12px; font-size:.84rem; color:var(--text-2)">
+            O Sistema avisa no seu celular quando o dia fecha com diária em aberto, e cobra de volta quem some.
+            Funciona com o app fechado. Só vale para este aparelho.
+          </p>
+          <div id="pushbox"></div>
+        </div></div>
+        <div class="win"><div class="wb">
           <h2 class="wt">Conta</h2>
           <p style="margin:-4px 0 12px; font-size:.84rem; color:var(--text-2)">
             Você está como <b id="whoami">—</b>. O progresso fica guardado neste navegador.
@@ -530,9 +544,7 @@ dialog .wb{max-height:86vh; overflow:auto}
     <label class="f"><span>Cabelo</span><input id="dcHair" type="color"></label>
     <label class="f"><span>Olhos</span><input id="dcEyes" type="color"></label>
   </div>
-  <label class="f"><span>Corte de cabelo</span><select id="dcStyle">
-    <option value="0">Curto</option><option value="1">Espetado</option><option value="2">Longo</option><option value="3">Rabo de cavalo</option>
-  </select></label>
+  <label class="f"><span>Corte de cabelo</span><select id="dcStyle"></select></label>
   <div class="dlg-act">
     <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancelar</button>
     <button class="btn" value="save" type="submit">Salvar</button>
@@ -747,11 +759,19 @@ async function publicarStatus(forcado){
   const st=eff(S);
   const corpo={hunter:hunterId(),guild:guildName(),name:(S.char.name||"Caçador").slice(0,24),
     level:S.level,total_xp:S.stats.totalXp|0,streak:S.streak|0,gold:S.gold|0,
-    titles:(S.titles||[]).length,stats:st,look:{char:S.char,equip:S.equip}};
+    titles:(S.titles||[]).length,stats:st,look:{char:S.char,equip:S.equip},
+    /* servem para as notificações saberem se você fechou o dia e que horas são aí */
+    cleared_on:S.clearedOn||null, tz_off:new Date().getTimezoneOffset()};
+  const bater=async body=>fetch(nuvemBase()+"/rest/v1/placar",{
+    method:"POST",headers:Object.assign({"Content-Type":"application/json",Prefer:"return=minimal"},nuvemHeaders()),
+    body:JSON.stringify(body)});
   try{
-    const r=await fetch(nuvemBase()+"/rest/v1/placar",{
-      method:"POST",headers:Object.assign({"Content-Type":"application/json",Prefer:"return=minimal"},nuvemHeaders()),
-      body:JSON.stringify(corpo)});
+    let r=await bater(corpo);
+    if(r.status===400){
+      /* banco ainda sem as colunas novas: manda no formato antigo e segue a vida */
+      const velho=Object.assign({},corpo); delete velho.cleared_on; delete velho.tz_off;
+      r=await bater(velho);
+    }
     if(!r.ok)throw new Error("HTTP "+r.status);
     return true;
   }catch(e){lastSend=0; return false;}
@@ -792,6 +812,100 @@ async function sincronizar(forcado){
   if(!nuvemLigada())return;
   await publicarStatus(forcado);
   await buscarPlacar(true);
+}
+
+/* ================= notificações do Sistema =================
+   O aviso sai do servidor (Supabase), não deste arquivo. Por isso
+   ele chega no celular mesmo com o app fechado e dias depois.
+   A chave abaixo é a PÚBLICA — pode ficar à vista, é para isso.
+   A privada mora só dentro da Edge Function. */
+const VAPID_PUBLICA="BKiJtKnKu09bfax-ozT8SbmPHo2fda-nMl5VYKTpXCI74SeQs5SO592ipqtmogiAvLP-Otb6ShzWb_4qTyecKNM";
+
+let swReg=null, pushEstado="checando";
+const pushSuportado=()=>("serviceWorker" in navigator)&&("PushManager" in window)&&("Notification" in window);
+const modoApp=()=>(window.matchMedia&&window.matchMedia("(display-mode: standalone)").matches)||window.navigator.standalone===true;
+const ehIOS=()=>/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
+
+async function registrarSW(){
+  if(!("serviceWorker" in navigator))return null;
+  try{
+    swReg=await navigator.serviceWorker.register("sw.js",{scope:"./"});
+    swReg.update().catch(()=>{});
+    return swReg;
+  }catch(e){return null;}
+}
+/* converte a chave pública de texto para o formato que o navegador exige */
+function chaveBin(txt){
+  const s=(txt+"=".repeat((4-txt.length%4)%4)).replace(/-/g,"+").replace(/_/g,"/");
+  const b=atob(s), u=new Uint8Array(b.length);
+  for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+  return u;
+}
+async function pushStatus(){
+  if(!pushSuportado())return "sem-suporte";
+  if(ehIOS()&&!modoApp())return "ios-instalar";
+  if(Notification.permission==="denied")return "bloqueado";
+  try{
+    const reg=swReg||await navigator.serviceWorker.getRegistration();
+    const sub=reg&&await reg.pushManager.getSubscription();
+    if(sub&&Notification.permission==="granted")return "ligado";
+  }catch(e){}
+  return "desligado";
+}
+async function pushAvisarServidor(sub){
+  if(!nuvemLigada())return false;
+  const j=sub&&sub.toJSON&&sub.toJSON();
+  if(!j||!j.endpoint||!j.keys||!j.keys.p256dh||!j.keys.auth)return false;
+  try{
+    const r=await fetch(nuvemBase()+"/rest/v1/push_subs",{
+      method:"POST",
+      headers:Object.assign({"Content-Type":"application/json",Prefer:"return=minimal,resolution=ignore-duplicates"},nuvemHeaders()),
+      body:JSON.stringify({hunter:hunterId(),endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,
+        name:(S.char.name||"Caçador").slice(0,24),tz_off:new Date().getTimezoneOffset()})});
+    return r.ok;
+  }catch(e){return false;}
+}
+async function pushLigar(){
+  if(!pushSuportado())return {ok:false,msg:"Este navegador não trabalha com notificação."};
+  if(ehIOS()&&!modoApp())return {ok:false,msg:"No iPhone, primeiro: Compartilhar → Adicionar à Tela de Início. Depois abra pelo ícone e ative aqui."};
+  if(!nuvemLigada())return {ok:false,msg:"O placar online não está configurado. Sem ele o Sistema não tem como te achar."};
+  let p;
+  try{p=await Notification.requestPermission();}catch(e){p="default";}
+  if(p!=="granted")return {ok:false,msg:p==="denied"?"Você bloqueou as notificações. Libere nas configurações do navegador para este site.":"Permissão não concedida."};
+  const reg=swReg||await registrarSW();
+  if(!reg)return {ok:false,msg:"Não deu para iniciar o serviço em segundo plano."};
+  await navigator.serviceWorker.ready;
+  let sub=null;
+  try{
+    sub=await reg.pushManager.getSubscription();
+    if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:chaveBin(VAPID_PUBLICA)});
+  }catch(e){return {ok:false,msg:"O navegador recusou a inscrição. Confira a internet e tente de novo."};}
+  if(!await pushAvisarServidor(sub))
+    return {ok:false,msg:"Inscrito no aparelho, mas o servidor não confirmou. Toque em Ativar mais uma vez."};
+  return {ok:true,msg:"O Sistema vai te cobrar."};
+}
+async function pushDesligar(){
+  try{
+    const reg=swReg||await navigator.serviceWorker.getRegistration();
+    const sub=reg&&await reg.pushManager.getSubscription();
+    if(sub)await sub.unsubscribe();
+  }catch(e){}
+}
+const PUSHTXT={
+  "ligado":["Ligado","O Sistema te cobra no celular quando o dia fecha em falta e quando você some.","Desligar","pushoff",true],
+  "desligado":["Desligado","Ative para o Sistema te cobrar mesmo com o app fechado.","Ativar notificações","pushon",false],
+  "bloqueado":["Bloqueado","Você negou a permissão neste navegador. Libere nas configurações do site e volte aqui.","Tentar de novo","pushon",false],
+  "ios-instalar":["Falta instalar","No iPhone só funciona com o app na tela de início: toque em Compartilhar → Adicionar à Tela de Início, abra pelo ícone e volte aqui.","","",false],
+  "sem-suporte":["Indisponível","Este navegador não trabalha com notificação. Use o Chrome no Android, ou o Safari no iPhone com o app na tela de início.","","",false],
+  "checando":["…","Verificando.","","",false]
+};
+async function renderPush(){
+  const el=$("#pushbox"); if(!el)return;
+  pushEstado=await pushStatus();
+  const t=PUSHTXT[pushEstado]||PUSHTXT.checando;
+  el.innerHTML='<div class="gear" style="margin-bottom:10px"><b>Estado</b><span>'+t[0]+'</span></div>'+
+    '<p style="margin:0 0 10px;font-size:.84rem;color:var(--text-2)">'+t[1]+'</p>'+
+    (t[2]?'<button class="btn wide'+(t[4]?" ghost":"")+'" data-act="'+t[3]+'">'+t[2]+'</button>':"");
 }
 
 /* ================= portal ================= */
@@ -1028,10 +1142,49 @@ const FORMS=[
  ["Monstruoso","Não parece mais a mesma pessoa."]
 ];
 const formIdx=A=>clamp(Math.floor(buildP(A)*5.999),0,5);
+
+/* ================= vigor =================
+   Quanto o personagem PARECE saudável. Diferente da forma física:
+   a forma vem de FOR/VIT/AGI, o vigor vem de TODOS os atributos mais
+   o nível. 0 = anêmico, pele acinzentada, olheiras fundas, olhar morto.
+   1 = corado, olhar aberto, postura erguida. */
+function vigorP(A){
+  A=A||S; const st=eff(A);
+  const atr=((st.FOR-5)+(st.VIT-5)+(st.AGI-5)+(st.INT-5)+(st.PER-5))/90;
+  return clamp(clamp(atr,0,1)*.62+clamp((A.level-1)/24,0,1)*.38,0,1);
+}
+const SAUDE=[
+ ["Anêmico","Pele acinzentada, olheiras fundas, olhar apagado."],
+ ["Abatido","Ainda cansado, mas o olhar já foca."],
+ ["Recuperando","A cor está voltando ao rosto."],
+ ["Saudável","Descansado. Pele firme, olhar limpo."],
+ ["Vigoroso","Energia sobrando — dá para ver de longe."],
+ ["Desperto","O corpo virou outra coisa. Ninguém encara de frente."]
+];
+const saudeIdx=A=>clamp(Math.floor(vigorP(A)*5.999),0,5);
+
+/* ---- cores ---- */
+function rgbOf(hex){
+  const s=String(hex||"#000").replace("#","");
+  const n=parseInt(s.length===3?s.split("").map(x=>x+x).join(""):s,16)||0;
+  return [n>>16&255,n>>8&255,n&255];
+}
+const hexOf=a=>"#"+((1<<24)+(Math.round(clamp(a[0],0,255))<<16)+(Math.round(clamp(a[1],0,255))<<8)+Math.round(clamp(a[2],0,255))).toString(16).slice(1);
+function mix(a,b,t){t=clamp(t,0,1);const A=rgbOf(a),B=rgbOf(b);return hexOf(A.map((v,i)=>v+(B[i]-v)*t));}
+/* pele sem sangue: cinza levemente esverdeada */
+function palido(hex){
+  const c=rgbOf(hex), y=c[0]*.36+c[1]*.5+c[2]*.14;
+  return hexOf([y*.94+6, y*.99+10, y*.95+14]);
+}
+/* pele viva: mais quente e mais saturada */
+function corado(hex){
+  const c=rgbOf(hex), m=(c[0]+c[1]+c[2])/3;
+  return hexOf([m+(c[0]-m)*1.3+17, m+(c[1]-m)*1.12+4, m+(c[2]-m)-5]);
+}
 /* gera o SVG de outro caçador com ids próprios, para não colidir na mesma página */
 function avatarFor(A,ns){
   const s=avatarSVG(A);
-  return ns?s.replace(/id="(sk|tc|au)"/g,'id="$1'+ns+'"').replace(/url\(#(sk|tc|au)\)/g,"url(#$1"+ns+")"):s;
+  return ns?s.replace(/id="(sk|tc|au|vg)"/g,'id="$1'+ns+'"').replace(/url\(#(sk|tc|au|vg)\)/g,"url(#$1"+ns+")"):s;
 }
 function shade(hex,amt){
   const h=String(hex||"#c99a76").replace("#","");
@@ -1042,14 +1195,18 @@ function shade(hex,amt){
 function avatarSVG(A){
   A=A||S;
   const c=A.char, p=buildP(A), st=eff(A);
-  const gaunt=1-clamp((st.VIT-5)/22,0,1);
+  const vig=vigorP(A), gaunt=1-vig;          /* gaunt = o quanto ainda parece doente */
   const cx=110,W=220,H=340;
-  const headY=58-3*p,hRx=19.5,hRyv=22.5;
+  const headY=58-3*p+2.6*gaunt,hRx=19.5,hRyv=22.5;   /* cabeça enfiada nos ombros quando fraco */
   const shY=94-5*p,shH=26+20*p,chH=22+13*p,wsH=16.5+7*p;
   const hipY=192,hipH=19+7*p;
   const armW=7.5+7*p,legW=12.5+7*p;
   const kneeY=252,ankY=306;
-  const skin=c.skin,skinD=shade(c.skin,-26),hair=c.hair;
+  /* a pele perde a cor quando o vigor está no chão e ganha calor quando sobe */
+  const skin = vig<.5 ? mix(palido(c.skin), c.skin, vig*2)
+                      : mix(c.skin, corado(c.skin), (vig-.5)*1.4);
+  const skinD=shade(skin,-26);
+  const hair = mix(mix(c.hair,"#6e6a64",.28), c.hair, vig);   /* cabelo sem brilho quando fraco */
   const eq={armor:item(A.equip.armor),weapon:item(A.equip.weapon),cape:item(A.equip.cape),acc:item(A.equip.acc)};
   const torso="M"+(cx-shH)+","+shY+
     " C"+(cx-chH-3)+","+(shY+26)+" "+(cx-wsH-2)+","+(hipY-56)+" "+(cx-wsH)+","+(hipY-32)+
@@ -1063,13 +1220,16 @@ function avatarSVG(A){
   const legL="M"+(cx-hipH*.52)+","+(hipY-4)+" L"+(cx-hipH*.6)+","+kneeY+" L"+(cx-hipH*.62)+","+ankY;
   const legR="M"+(cx+hipH*.52)+","+(hipY-4)+" L"+(cx+hipH*.6)+","+kneeY+" L"+(cx+hipH*.62)+","+ankY;
 
-  let s='<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Personagem nível '+A.level+', forma '+FORMS[formIdx(A)][0]+'">';
+  let s='<svg viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Personagem nível '+A.level+', forma '+FORMS[formIdx(A)][0]+', '+SAUDE[saudeIdx(A)][0]+'">';
   s+='<defs>'+
     '<linearGradient id="sk" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="'+skinD+'"/><stop offset=".45" stop-color="'+skin+'"/><stop offset="1" stop-color="'+shade(skin,-16)+'"/></linearGradient>'+
     '<radialGradient id="au"><stop offset="0" stop-color="rgba(160,107,255,.5)"/><stop offset=".6" stop-color="rgba(120,80,255,.16)"/><stop offset="1" stop-color="rgba(120,80,255,0)"/></radialGradient>'+
+    '<radialGradient id="vg"><stop offset="0" stop-color="rgba(94,199,255,.40)"/><stop offset=".55" stop-color="rgba(70,224,160,.14)"/><stop offset="1" stop-color="rgba(70,224,160,0)"/></radialGradient>'+
     '<clipPath id="tc"><path d="'+torso+'"/></clipPath></defs>';
   s+='<ellipse cx="'+cx+'" cy="320" rx="'+(52+16*p)+'" ry="10" fill="rgba(94,199,255,.10)"/>';
   s+='<ellipse cx="'+cx+'" cy="320" rx="'+(30+12*p)+'" ry="5.5" fill="rgba(94,199,255,.16)"/>';
+  /* brilho de vitalidade: só aparece quando a saúde passa da metade */
+  if(vig>.55)s+='<ellipse cx="'+cx+'" cy="182" rx="'+(64+18*p)+'" ry="116" fill="url(#vg)" opacity="'+(.6*(vig-.55)/.45).toFixed(2)+'"/>';
   if(eq.acc.id==="a_aura")s+='<circle cx="'+cx+'" cy="180" r="130" fill="url(#au)"/>';
   s+=capeSVG(eq.cape.id,g);
   s+='<g stroke="url(#sk)" stroke-width="'+legW+'" fill="none" stroke-linecap="round"><path d="'+legL+'"/><path d="'+legR+'"/></g>';
@@ -1089,18 +1249,36 @@ function avatarSVG(A){
     s+='<path d="M'+(cx-chH*.8)+','+(shY+26)+' q'+(chH*.8).toFixed(1)+',14 '+(chH*1.6).toFixed(1)+',0" stroke-width="'+(1+1.4*p).toFixed(2)+'" opacity="'+(.45*p).toFixed(2)+'"/>';
     for(let i=0;i<3;i++){const y=shY+50+i*11;s+='<path d="M'+(cx-11)+','+y+' h22" stroke-width="'+(1+1.2*p).toFixed(2)+'" opacity="'+(.35*p).toFixed(2)+'"/>';}
   }
+  /* brilho de pele saudável no peito */
+  if(vig>.5)s+='<path d="M'+(cx-chH*.55).toFixed(1)+','+(shY+17)+' q'+(chH*.55).toFixed(1)+',-7 '+(chH*1.1).toFixed(1)+',0" stroke="'+shade(skin,40)+'" stroke-width="'+(2.4+2*p).toFixed(1)+'" opacity="'+(.3*(vig-.5)*2).toFixed(2)+'"/>';
   s+='</g>';
   s+=armorSVG(eq.armor.id,g);
+  s+=hairSVG(c.style,g,hair,"tras");   /* volume do cabelo, atrás da cabeça */
   s+='<path d="M'+(cx-(4.5+2.5*p))+','+(headY+14)+' h'+(9+5*p)+' v'+(shY-headY-10)+' h-'+(9+5*p)+' Z" fill="'+skinD+'"/>';
   s+='<ellipse cx="'+cx+'" cy="'+headY+'" rx="'+hRx+'" ry="'+hRyv+'" fill="url(#sk)"/>';
-  if(gaunt>.35)s+='<g fill="'+shade(skin,-30)+'" opacity="'+(.55*gaunt).toFixed(2)+'"><ellipse cx="'+(cx-11)+'" cy="'+(headY+5)+'" rx="4.5" ry="7"/><ellipse cx="'+(cx+11)+'" cy="'+(headY+5)+'" rx="4.5" ry="7"/></g>';
+  /* bochechas encovadas — somem conforme o vigor sobe */
+  if(gaunt>.35)s+='<g fill="'+shade(skin,-30)+'" opacity="'+(.55*(gaunt-.35)/.65).toFixed(2)+'"><ellipse cx="'+(cx-13.5)+'" cy="'+(headY+7)+'" rx="3.8" ry="6.4"/><ellipse cx="'+(cx+13.5)+'" cy="'+(headY+7)+'" rx="3.8" ry="6.4"/></g>';
+  /* OLHEIRAS — fundas e arroxeadas no começo, desaparecem quando ele fica saudável */
+  if(gaunt>.12){
+    const oc=mix(shade(skin,-48),"#3a2140",.5), fundo=(1.5+4.8*gaunt).toFixed(1), volta=(2+2.6*gaunt).toFixed(1);
+    s+='<g fill="'+oc+'" opacity="'+(.75*gaunt).toFixed(2)+'">'+
+      '<path d="M'+(cx-12)+','+(headY+2.6)+' q4.5,'+fundo+' 9,0 q-4.5,'+volta+' -9,0 Z"/>'+
+      '<path d="M'+(cx+3)+','+(headY+2.6)+' q4.5,'+fundo+' 9,0 q-4.5,'+volta+' -9,0 Z"/></g>';
+  }
   const glow=eq.armor.id==="monarch"||eq.acc.id==="a_aura";
-  const eyeC=glow?"#c9a5ff":(c.eyes||"#7fd8ff");
+  /* olhos: apagados e semicerrados quando fraco, abertos e vivos quando forte */
+  const eyeC=glow?"#c9a5ff":mix(mix(c.eyes||"#7fd8ff","#6a7b8c",.55),c.eyes||"#7fd8ff",vig);
+  const eUp=(3.2*(.68+.58*vig)).toFixed(1), eDown=(4.2*(.62+.52*vig)).toFixed(1);
   if(glow)s+='<g fill="'+eyeC+'" opacity=".3"><circle cx="'+(cx-7)+'" cy="'+(headY+1)+'" r="6"/><circle cx="'+(cx+7)+'" cy="'+(headY+1)+'" r="6"/></g>';
-  s+='<g fill="'+eyeC+'"><path d="M'+(cx-11)+','+(headY+1)+' q4,-3.2 8,0 q-4,4.2 -8,0 Z"/><path d="M'+(cx+3)+','+(headY+1)+' q4,-3.2 8,0 q-4,4.2 -8,0 Z"/></g>';
-  s+='<path d="M'+(cx-3.5)+','+(headY+12)+' q3.5,'+(gaunt>.5?"-1.5":"2.2")+' 7,0" stroke="'+shade(skin,-40)+'" stroke-width="1.4" fill="none" stroke-linecap="round"/>';
-  s+='<g fill="none" stroke="'+shade(skin,-34)+'" stroke-width="1.2" opacity=".7"><path d="M'+(cx-13)+','+(headY-5)+' q4,-2.6 8,-.6"/><path d="M'+(cx+13)+','+(headY-5)+' q-4,-2.6 -8,-.6"/></g>';
-  s+=hairSVG(c.style,g,hair);
+  else if(vig>.75)s+='<g fill="'+eyeC+'" opacity="'+(.16*(vig-.75)/.25).toFixed(2)+'"><circle cx="'+(cx-7)+'" cy="'+(headY+1)+'" r="4.4"/><circle cx="'+(cx+7)+'" cy="'+(headY+1)+'" r="4.4"/></g>';
+  s+='<g fill="'+eyeC+'"><path d="M'+(cx-11)+','+(headY+1)+' q4,-'+eUp+' 8,0 q-4,'+eDown+' -8,0 Z"/><path d="M'+(cx+3)+','+(headY+1)+' q4,-'+eUp+' 8,0 q-4,'+eDown+' -8,0 Z"/></g>';
+  /* boca: de virada para baixo até um esboço de sorriso */
+  s+='<path d="M'+(cx-3.8)+','+(headY+12.5)+' q3.8,'+(-2.2+4.6*vig).toFixed(1)+' 7.6,0" stroke="'+mix(shade(skin,-40),"#8c4a52",.4*vig)+'" stroke-width="'+(1.3+.4*vig).toFixed(1)+'" fill="none" stroke-linecap="round"/>';
+  /* sobrancelhas: caídas e ralas quando fraco, firmes quando forte */
+  s+='<g fill="none" stroke="'+shade(skin,-34)+'" stroke-width="'+(1+.9*vig).toFixed(2)+'" opacity="'+(.55+.35*vig).toFixed(2)+'" stroke-linecap="round">'+
+    '<path d="M'+(cx-13)+','+(headY-5+1.8*gaunt).toFixed(1)+' q4,'+(-2.4-1.6*vig).toFixed(1)+' 8,-.6"/>'+
+    '<path d="M'+(cx+13)+','+(headY-5+1.8*gaunt).toFixed(1)+' q-4,'+(-2.4-1.6*vig).toFixed(1)+' -8,-.6"/></g>';
+  s+=hairSVG(c.style,g,hair,"frente");
   s+=accSVG(eq.acc.id,g);
   s+=weaponSVG(eq.weapon.id,g);
   if(eq.acc.id==="a_aura"||eq.armor.id==="monarch"){
@@ -1113,10 +1291,171 @@ function avatarSVG(A){
   }
   return s+'</svg>';
 }
-function hairSVG(style,g,col){
-  const cx=g.cx,headY=g.headY,hRx=g.hRx,hi=shade(col,34);
-  if(style==2)return '<path d="M'+(cx-hRx-2)+','+(headY-4)+' q1,-26 '+hRx+',-26 q'+hRx+',0 '+(hRx+1)+',26 l1,44 q-6,-24 -9,-40 q-11,9 -25,1 q-2,16 -6,38 Z" fill="'+col+'"/>'+
+/* ================= cortes de cabelo =================
+   A ordem desta lista é a ordem do menu em "Editar personagem".
+   O número é o que fica salvo — nunca reordene, só acrescente no fim. */
+const CORTES=["Curto","Espetado","Longo","Rabo de cavalo","Black power","Moicano",
+  "Low fade","Dreads","Raspado","Coque samurai","Tranças","Cacheado","Topete"];
+
+function hairSVG(style,g,col,camada){
+  const cx=g.cx,headY=g.headY,hRx=g.hRx,hRy=g.hRyv;
+  const hi=shade(col,34), lo=shade(col,-24);
+  const tras=camada==="tras", frente=!tras;
+
+  /* franja: peça da frente, cobre a testa e para acima das sobrancelhas */
+  const franja=m=>'M'+(cx-hRx-m)+','+(headY-3)+' q2,'+(-23-m)+' '+(hRx+m)+','+(-23-m)+
+    ' q'+(hRx+m-1)+',0 '+(hRx+m)+','+(23+m)+' q-3,-14 -13,-15 q-7,8 -21,7 Z';
+  /* calota lisa, sem franja: cabelo penteado para trás ou raspado */
+  const calota=m=>'M'+(cx-hRx-m)+','+(headY-5)+' q1,'+(-20-m)+' '+(hRx+m)+','+(-20-m)+
+    ' q'+(hRx+m-1)+',0 '+(hRx+m)+','+(20+m)+' q-4,-12 -'+(hRx+m)+',-12 q-'+(hRx+m)+',0 -'+(hRx+m)+',12 Z';
+  /* massa que fica ATRÁS da cabeça — é ela que dá volume sem tapar o rosto */
+  const volume=(m,dy,c)=>'<ellipse cx="'+cx+'" cy="'+(headY+dy)+'" rx="'+(hRx+m).toFixed(1)+
+    '" ry="'+(hRy+m*.78).toFixed(1)+'" fill="'+(c||col)+'"/>';
+
+  /* --- 4 · black power --- */
+  if(style==4){
+    if(tras){
+      let s=volume(13,-6);
+      s+='<g fill="none" stroke="'+lo+'" stroke-width="2" opacity=".45" stroke-linecap="round">';
+      for(let i=0;i<12;i++){
+        const a=Math.PI*(1.02+i*.087), rr=hRx+13-4-(i%3)*5;
+        const x=cx+Math.cos(a)*rr, y=headY-6+Math.sin(a)*rr*((hRy+10)/(hRx+13));
+        s+='<path d="M'+x.toFixed(1)+','+y.toFixed(1)+' q3,-3.6 6.4,-1"/>';
+      }
+      return s+'</g>';
+    }
+    let s='<path d="'+franja(2)+'" fill="'+col+'"/>';
+    s+='<g fill="none" stroke="'+hi+'" stroke-width="1.5" opacity=".3" stroke-linecap="round">';
+    for(let i=0;i<5;i++)s+='<path d="M'+(cx-14+i*6)+','+(headY-17+(i%2)*4)+' q3,-3.6 6.4,-1"/>';
+    return s+'</g>';
+  }
+
+  /* --- 5 · moicano --- */
+  if(style==5){
+    if(tras)return "";
+    let s='<path d="'+calota(0)+'" fill="'+lo+'" opacity=".4"/>';
+    s+='<path d="M'+(cx-7.5)+','+(headY-15)+
+      ' L'+(cx-6)+','+(headY-33)+' L'+(cx-3)+','+(headY-21)+
+      ' L'+(cx-1)+','+(headY-41)+' L'+(cx+1.5)+','+(headY-22)+
+      ' L'+(cx+4.5)+','+(headY-36)+' L'+(cx+7.5)+','+(headY-15)+
+      ' Q'+cx+','+(headY-20)+' '+(cx-7.5)+','+(headY-15)+' Z" fill="'+col+'"/>';
+    s+='<path d="M'+(cx-3.5)+','+(headY-20)+' q3.5,-8 7,-2" stroke="'+hi+'" stroke-width="1.7" fill="none" opacity=".45" stroke-linecap="round"/>';
+    return s;
+  }
+
+  /* --- 6 · low fade (degradê baixo) --- */
+  if(style==6){
+    if(tras)return "";
+    let s='<path d="'+calota(0)+'" fill="'+col+'"/>';
+    /* o degradê: a lateral vai clareando até sumir na pele, sem cruzar o rosto */
+    for(let i=0;i<5;i++){
+      const y=headY-5+i*2.6, op=(.55-i*.108).toFixed(2);
+      const w=hRx*Math.sqrt(Math.max(.05,1-Math.pow((y-headY)/hRy,2)));
+      s+='<g stroke="'+col+'" stroke-width="2.3" opacity="'+op+'" stroke-linecap="round">'+
+        '<path d="M'+(cx-w+.8).toFixed(1)+','+y.toFixed(1)+' h2.4"/>'+
+        '<path d="M'+(cx+w-3.2).toFixed(1)+','+y.toFixed(1)+' h2.4"/></g>';
+    }
+    s+='<path d="M'+(cx-11)+','+(headY-18)+' q9,-5 19,-1" stroke="'+hi+'" stroke-width="1.8" fill="none" opacity=".4" stroke-linecap="round"/>';
+    return s;
+  }
+
+  /* --- 7 · dreads --- */
+  if(style==7){
+    const caindo=[[-19,-10,-25,20],[-15,-18,-21,10],[19,-10,25,20],[15,-18,21,10]];
+    const emPe=[[-8,-20,-11,-40],[0,-22,0,-43],[8,-20,12,-38]];
+    const risca=m=>{let d="";for(let k=1;k<=3;k++){
+      const t=k/4, x=cx+m[0]+(m[2]-m[0])*t, y=headY+m[1]+(m[3]-m[1])*t;
+      d+='<path d="M'+(x-2.2).toFixed(1)+','+y.toFixed(1)+' h4.4"/>';}return d;};
+    if(tras){
+      let s=volume(3,-1);
+      s+='<g stroke="'+col+'" stroke-width="4.4" stroke-linecap="round" fill="none">';
+      caindo.forEach(m=>{s+='<path d="M'+(cx+m[0])+','+(headY+m[1])+' L'+(cx+m[2])+','+(headY+m[3])+'"/>';});
+      s+='</g><g stroke="'+lo+'" stroke-width=".9" opacity=".55" fill="none">';
+      caindo.forEach(m=>{s+=risca(m);});
+      return s+'</g>';
+    }
+    let s='<g stroke="'+col+'" stroke-width="4.4" stroke-linecap="round" fill="none">';
+    emPe.forEach(m=>{s+='<path d="M'+(cx+m[0])+','+(headY+m[1])+' L'+(cx+m[2])+','+(headY+m[3])+'"/>';});
+    s+='</g><path d="'+franja(2)+'" fill="'+col+'"/>';
+    s+='<g stroke="'+lo+'" stroke-width=".9" opacity=".55" fill="none">';
+    emPe.forEach(m=>{s+=risca(m);});
+    return s+'</g>';
+  }
+
+  /* --- 8 · raspado --- */
+  if(style==8)return tras?"":'<path d="'+calota(0)+'" fill="'+col+'" opacity=".3"/>';
+
+  /* --- 9 · coque samurai --- */
+  if(style==9){
+    if(tras)return '<circle cx="'+cx+'" cy="'+(headY-25)+'" r="9" fill="'+lo+'"/>'+
+      '<circle cx="'+cx+'" cy="'+(headY-25)+'" r="9" fill="none" stroke="'+col+'" stroke-width="1.4" opacity=".7"/>';
+    let s='<path d="'+calota(1)+'" fill="'+col+'"/>';
+    s+='<g fill="none" stroke="'+hi+'" stroke-width="1.1" opacity=".38">'+
+      '<path d="M'+(cx-14)+','+(headY-10)+' q13,-8 27,-2"/>'+
+      '<path d="M'+(cx-12)+','+(headY-16)+' q11,-6 23,-1"/></g>';
+    return s;
+  }
+
+  /* --- 10 · tranças --- */
+  if(style==10){
+    if(tras){
+      const tranca=(x0,y0,x1,y1)=>{
+        let d="M"+x0.toFixed(1)+","+y0.toFixed(1);
+        for(let i=1;i<=7;i++){const t=i/7;
+          d+=" L"+(x0+(x1-x0)*t+(i%2?2.2:-2.2)).toFixed(1)+","+(y0+(y1-y0)*t).toFixed(1);}
+        return '<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="3.1" stroke-linecap="round" stroke-linejoin="round"/>';
+      };
+      let s=volume(1.5,0);
+      [[-20,-8,-25,34],[-15,-16,-21,26],[20,-8,25,34],[15,-16,21,26]]
+        .forEach(m=>{s+=tranca(cx+m[0],headY+m[1],cx+m[2],headY+m[3]);});
+      return s;
+    }
+    let s='<path d="'+calota(1)+'" fill="'+col+'"/>';
+    s+='<g fill="none" stroke="'+lo+'" stroke-width=".9" opacity=".6">';
+    for(let i=-2;i<=2;i++)s+='<path d="M'+(cx+i*6.5)+','+(headY-8)+' L'+(cx+i*8.5)+','+(headY-23)+'"/>';
+    return s+'</g>';
+  }
+
+  /* --- 11 · cacheado --- */
+  if(style==11){
+    if(tras){
+      let s=volume(5,-2)+'<g fill="'+col+'">';
+      for(let i=0;i<13;i++){
+        const a=Math.PI*(.98+i*.085);
+        const x=cx+Math.cos(a)*(hRx+4.5), y=headY-2+Math.sin(a)*(hRy+4);
+        s+='<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="'+(4.3+(i%2)*1.4).toFixed(1)+'"/>';
+      }
+      return s+'</g>';
+    }
+    let s='<path d="'+franja(2.5)+'" fill="'+col+'"/>';
+    s+='<g fill="'+col+'">';
+    for(let i=0;i<6;i++)s+='<circle cx="'+(cx-14+i*5.6).toFixed(1)+'" cy="'+(headY-19-(i%2)*3)+'" r="'+(3.6+(i%2)).toFixed(1)+'"/>';
+    s+='</g><g fill="none" stroke="'+hi+'" stroke-width="1.3" opacity=".3" stroke-linecap="round">';
+    for(let i=0;i<5;i++)s+='<path d="M'+(cx-13+i*6)+','+(headY-17+(i%2)*4)+' q3,-4 6,0"/>';
+    return s+'</g>';
+  }
+
+  /* --- 12 · topete --- */
+  if(style==12){
+    if(tras)return "";
+    let s='<path d="M'+(cx-hRx+2)+','+(headY-15)+' q-4,-17 10,-22 q15,-5 19,7 q-8,-7 -16,-2 q-8,5 -6,17 Z" fill="'+col+'"/>';
+    s+='<path d="'+calota(0)+'" fill="'+col+'"/>';
+    s+='<path d="M'+(cx-9)+','+(headY-26)+' q9,-6 17,0" stroke="'+hi+'" stroke-width="1.7" fill="none" opacity=".45" stroke-linecap="round"/>';
+    return s;
+  }
+
+  if(tras){
+    /* 2 · longo e 3 · rabo de cavalo têm massa atrás */
+    if(style==2)return '<path d="M'+(cx-hRx-2)+','+(headY-4)+' q1,-26 '+hRx+',-26 q'+hRx+',0 '+(hRx+1)+',26 l1,44 q-6,-24 -9,-40 q-11,9 -25,1 q-2,16 -6,38 Z" fill="'+col+'"/>';
+    if(style==3)return '<path d="M'+(cx+hRx-2)+','+(headY-10)+' q16,4 14,26 q-2,20 -12,28 q10,-20 6,-34 q-3,-11 -8,-14 Z" fill="'+shade(col,-12)+'"/>';
+    return "";
+  }
+
+  /* --- 2 · longo (frente) --- */
+  if(style==2)return '<path d="'+franja(1)+'" fill="'+col+'"/>'+
     '<path d="M'+(cx-13)+','+(headY-17)+' q9,-6 20,-1" stroke="'+hi+'" stroke-width="2" fill="none" opacity=".5"/>';
+
+  /* --- 1 · espetado --- */
   if(style==1){
     let dd="M"+(cx-hRx-1)+","+(headY-2)+" ";
     [[-16,-20],[-11,-30],[-5,-18],[0,-32],[6,-18],[12,-29],[17,-17]].forEach(pt=>{
@@ -1124,9 +1463,12 @@ function hairSVG(style,g,col){
     dd+="L"+(cx+hRx+1)+","+(headY-2)+" q-"+hRx+",-16 -"+(hRx*2)+",0 Z";
     return '<path d="'+dd+'" fill="'+col+'"/>';
   }
-  if(style==3)return '<path d="M'+(cx+hRx-2)+','+(headY-10)+' q16,4 14,26 q-2,20 -12,28 q10,-20 6,-34 q-3,-11 -8,-14 Z" fill="'+shade(col,-12)+'"/>'+
-    '<path d="M'+(cx-hRx-1)+','+(headY-3)+' q2,-23 '+(hRx+1)+',-23 q'+hRx+',0 '+(hRx+1)+',23 q-4,-13 -14,-13 q-12,0 -16,13 Z" fill="'+col+'"/>';
-  return '<path d="M'+(cx-hRx-1)+','+(headY-3)+' q2,-24 '+(hRx+1)+',-24 q'+hRx+',0 '+(hRx+1)+',24 q-3,-14 -13,-15 q-7,8 -21,7 Z" fill="'+col+'"/>'+
+
+  /* --- 3 · rabo de cavalo (frente) --- */
+  if(style==3)return '<path d="'+calota(1)+'" fill="'+col+'"/>';
+
+  /* --- 0 · curto (padrão) --- */
+  return '<path d="'+franja(1)+'" fill="'+col+'"/>'+
     '<path d="M'+(cx-12)+','+(headY-18)+' q9,-5 19,-1" stroke="'+hi+'" stroke-width="2" fill="none" opacity=".45"/>';
 }
 function pantsSVG(id,g,legW){
@@ -1267,8 +1609,10 @@ function render(){
   $("#whoami").textContent=(CUR&&CUR.name)||S.char.name;
 
   $("#avatar").innerHTML=avatarSVG();
-  const fi=formIdx();
-  $("#formtag").innerHTML="Forma: "+FORMS[fi][0]+"<span>"+FORMS[fi][1]+"</span>";
+  const fi=formIdx(), si=saudeIdx();
+  $("#formtag").innerHTML="Forma: "+FORMS[fi][0]+" · Saúde: "+SAUDE[si][0]+
+    "<span>"+FORMS[fi][1]+" "+SAUDE[si][1]+"</span>";
+  renderPush();
 
   $("#statlist").innerHTML=Object.keys(STATS).map(k=>{
     const pr=(S.prog[k]||0)%4;
@@ -1356,7 +1700,7 @@ function renderGuild(){
       '<div class="pos">'+(i+1)+'</div>'+
       '<div class="mini">'+avatarFor(r.s,"g"+i)+'</div>'+
       '<div><div class="gname"><b>'+esc(r.s.char.name||"Caçador")+'</b>'+(me?'<span class="you">VOCÊ</span>':'')+'</div>'+
-      '<div class="gsub">Nível '+r.s.level+' · <span style="color:'+rk[3]+'">'+rk[2]+'</span> · '+FORMS[fi][0]+'</div>'+
+      '<div class="gsub">Nível '+r.s.level+' · <span style="color:'+rk[3]+'">'+rk[2]+'</span> · '+FORMS[fi][0]+' · '+SAUDE[saudeIdx(r.s)][0]+'</div>'+
       '<div class="gsub">Sequência <em>'+(r.s.streak||0)+' d</em> · '+(r.s.titles?r.s.titles.length:0)+' títulos · '+(r.s.gold||0)+' ouro</div>'+
       '<div class="gs">'+Object.keys(STATS).map(k=>'<span'+(k===top?' class="hi"':'')+'>'+k+' <b>'+st[k]+'</b></span>').join("")+'</div>'+
       '</div></div>';
@@ -1424,6 +1768,17 @@ $("#app").addEventListener("click",e=>{
   else if(a==="sync"){
     b.disabled=true; b.textContent="Enviando…";
     sincronizar(true).then(()=>{b.disabled=false;b.textContent="Enviar e atualizar";});
+  }
+  else if(a==="pushon"){
+    b.disabled=true; b.textContent="Aguarde…";
+    pushLigar().then(r=>{
+      toast(r.ok?"O Sistema está de olho":"Não deu",r.msg,r.ok?"gold":"warn");
+      renderPush();
+    });
+  }
+  else if(a==="pushoff"){
+    b.disabled=true;
+    pushDesligar().then(()=>{toast("Notificações desligadas","O Sistema para de te cobrar aqui.","");renderPush();});
   }
   else if(a==="guildcode"){$("#dgName").value=guildName();$("#dlgGuild").showModal();}
   else if(a==="code")openCode();
@@ -1538,7 +1893,8 @@ $("#dlgQuest").addEventListener("close",()=>{
 function openChar(){
   $("#dcName").value=S.char.name; $("#dcTitle").value=S.char.title;
   $("#dcSkin").value=S.char.skin; $("#dcHair").value=S.char.hair; $("#dcEyes").value=S.char.eyes;
-  $("#dcStyle").value=S.char.style;
+  $("#dcStyle").innerHTML=CORTES.map((n,i)=>'<option value="'+i+'">'+n+'</option>').join("");
+  $("#dcStyle").value=clamp(+S.char.style||0,0,CORTES.length-1);
   $("#dlgChar").showModal();
 }
 $("#dlgChar").addEventListener("close",()=>{
@@ -1554,6 +1910,15 @@ drawPortal();
   const sid=ls(K_SESS,null);
   const u=sid&&USERS.find(x=>x.id===sid);
   if(u)login(u);
+  /* liga o serviço de segundo plano e, se já houver inscrição, reconfirma no servidor */
+  registrarSW().then(async reg=>{
+    renderPush();
+    if(!reg||!CUR)return;
+    try{
+      const sub=await reg.pushManager.getSubscription();
+      if(sub&&Notification.permission==="granted")pushAvisarServidor(sub);
+    }catch(e){}
+  });
 })();
 setInterval(()=>{if(CUR&&S.lastDay!==todayStr()){rollover();render();}},60000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&CUR&&S.lastDay!==todayStr()){rollover();render();}});
