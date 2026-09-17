@@ -403,6 +403,7 @@ dialog .wb{max-height:86vh; overflow:auto}
           <button class="btn ghost" id="btnCode">Colar código</button>
           <button class="btn ghost" id="btnRestore">Abrir backup</button>
         </div>
+        <div style="margin-top:8px"><button class="btn ghost wide" id="btnLimpar">Remover caçador · Administrador</button></div>
       </div>
       <p class="portal-note">Já joga em outro aparelho? Use <b>Colar código</b> para trazer seu progresso para cá.<br>
       Cada caçador tem progresso separado neste aparelho. O PIN só serve para ninguém abrir o seu por engano — não é senha de banco.</p>
@@ -617,6 +618,19 @@ dialog .wb{max-height:86vh; overflow:auto}
   <div class="dlg-act">
     <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancelar</button>
     <button class="btn" value="save" type="submit">Despertar</button>
+  </div>
+</div></form></dialog>
+
+<dialog id="dlgAdmin"><form method="dialog" class="win"><div class="wb">
+  <h2 class="wt">Acesso do Administrador</h2>
+  <p style="margin:-4px 0 12px; font-size:.84rem; color:var(--text-2)">
+    Somente o Administrador pode apagar caçadores. Digite o PIN para continuar.
+  </p>
+  <label class="f"><span>PIN do Administrador</span><input id="daPin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••"></label>
+  <div class="err" id="daErr"></div>
+  <div class="dlg-act">
+    <button class="btn ghost" value="cancel" type="submit" formnovalidate>Cancelar</button>
+    <button class="btn" value="save" type="submit">Entrar</button>
   </div>
 </div></form></dialog>
 
@@ -1109,26 +1123,64 @@ async function renderPush(){
 }
 
 /* ================= portal ================= */
+/* PIN do Administrador — só ele apaga caçador.
+   Guardado embaralhado para não ficar à vista de quem abrir o código.
+   Para trocar: rode hash("NOVOPIN") no console e cole o número aqui. */
+const PIN_ADMIN=2088361684;
+let modoLimpar=false;   /* na tela inicial: tocar num caçador remove em vez de entrar */
+
 function drawPortal(){
   USERS=ls(K_USERS,[]);
   const list=$("#plist");
   if(!USERS.length){
     list.innerHTML='<div class="empty">Nenhum caçador registrado neste aparelho.</div>';
+    modoLimpar=false;
   }else{
     list.innerHTML=USERS.slice().sort((a,b)=>(b.seen||0)-(a.seen||0)).map(u=>{
       const r=rankOf(u.level||1);
-      return '<button class="pcard" data-uid="'+u.id+'">'+
-        '<span class="sig" style="color:'+r[3]+'">'+r[1]+'</span>'+
-        '<span class="nm">'+esc(u.name||"Caçador")+'<span class="mt" style="display:block">Nível '+(u.level||1)+' · '+r[2]+'</span></span>'+
-        (u.pin?'<span class="lk">PIN</span>':'')+
+      return '<button class="pcard" data-uid="'+u.id+'"'+(modoLimpar?' style="border-color:var(--danger)"':'')+'>'+
+        '<span class="sig" style="color:'+(modoLimpar?"var(--danger)":r[3])+'">'+(modoLimpar?"×":r[1])+'</span>'+
+        '<span class="nm">'+esc(u.name||"Caçador")+'<span class="mt" style="display:block">'+
+          (modoLimpar?"Tocar para remover":"Nível "+(u.level||1)+" · "+r[2])+'</span></span>'+
+        (u.pin&&!modoLimpar?'<span class="lk">PIN</span>':'')+
         '</button>';
     }).join("");
   }
+  const bt=$("#btnLimpar");
+  if(bt){
+    bt.textContent=modoLimpar?"Cancelar remoção":"Remover caçador · Administrador";
+    bt.hidden=!USERS.length;
+  }
+}
+
+/* Já passou pelo PIN do Administrador. A confirmação com o nome à vista
+   continua, porque o risco que sobra é tocar no card errado. */
+function removerCacador(u){
+  const aviso="Remover o caçador \""+(u.name||"Caçador")+"\" (nível "+(u.level||1)+") deste aparelho?"+
+    "\n\nTodo o progresso dele será apagado e NÃO tem como desfazer."+
+    "\n\nIsto não mexe nos outros caçadores.";
+  if(!confirm(aviso))return;
+  try{localStorage.removeItem(K_SAVE(u.id));}catch(e){}
+  USERS=USERS.filter(x=>x.id!==u.id); lsSet(K_USERS,USERS);
+  if(ls(K_SESS,null)===u.id){try{localStorage.removeItem(K_SESS);}catch(e){}}
+  modoLimpar=false; drawPortal();
+  alert("\""+(u.name||"Caçador")+"\" foi removido deste aparelho.");
 }
 let pending=null;
+$("#btnLimpar").addEventListener("click",()=>{
+  if(modoLimpar){modoLimpar=false;drawPortal();return;}
+  $("#daPin").value=""; $("#daErr").textContent=""; $("#dlgAdmin").showModal(); $("#daPin").focus();
+});
+$("#dlgAdmin").addEventListener("close",()=>{
+  if($("#dlgAdmin").returnValue!=="save")return;
+  if(hash($("#daPin").value)===PIN_ADMIN){ modoLimpar=true; drawPortal(); }
+  else alert("PIN incorreto.\n\nSomente o Administrador pode apagar caçadores.");
+  $("#daPin").value="";
+});
 $("#plist").addEventListener("click",e=>{
   const c=e.target.closest(".pcard"); if(!c)return;
   const u=USERS.find(x=>x.id===c.dataset.uid); if(!u)return;
+  if(modoLimpar){removerCacador(u);return;}
   if(u.pin){
     pending=u; $("#pinwho").textContent=u.name; $("#pininput").value=""; $("#pinerr").textContent="";
     $("#pinrow").hidden=false; $("#newrow").hidden=true; $("#plist").hidden=true; $("#pininput").focus();
