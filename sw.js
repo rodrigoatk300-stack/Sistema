@@ -6,7 +6,7 @@
    Ao publicar uma versao nova do jogo, troque o numero do CACHE
    abaixo (v1 -> v2). Sem isso alguns celulares podem demorar a ver.
    ============================================================ */
-const CACHE = "despertar-v5";
+const CACHE = "despertar-v6";
 const ESSENCIAL = ["./", "./index.html", "./manifest.json", "./icone-192.png", "./icone-512.png"];
 
 self.addEventListener("install", e => {
