@@ -6,7 +6,7 @@
    Ao publicar uma versao nova do jogo, troque o numero do CACHE
    abaixo (v1 -> v2). Sem isso alguns celulares podem demorar a ver.
    ============================================================ */
-const CACHE = "despertar-v2";
+const CACHE = "despertar-v3";
 const ESSENCIAL = ["./", "./index.html", "./manifest.json", "./icone-192.png", "./icone-512.png"];
 
 self.addEventListener("install", e => {
@@ -60,7 +60,8 @@ self.addEventListener("push", e => {
     badge: "./icone-192.png",
     vibrate: [90, 60, 90, 60, 180],
     requireInteraction: d.tag === "abandono",
-    data: { url: d.url || "./" }
+    // aviso de mensagem abre direto na aba do chat
+    data: { url: d.url || (d.tag === "chat" ? "./?aba=chat" : "./") }
   }));
 });
 
